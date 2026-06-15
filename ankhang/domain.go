@@ -2,125 +2,98 @@ package ankhang
 
 import (
 	"context"
-	"net/url"
 	"strings"
 
 	"github.com/tamnd/any-cli/kit"
 	"github.com/tamnd/any-cli/kit/errs"
 )
 
-// domain.go exposes ankhang as a kit Domain: a driver that a multi-domain
-// host (ant) enables with a single blank import,
-//
-//	import _ "github.com/tamnd/ankhang-cli/ankhang"
-//
-// exactly as a database/sql program enables a driver with `import _
-// "github.com/lib/pq"`. The init below registers it; the host then dereferences
-// ankhang:// URIs by routing to the operations Register installs. The same
-// Domain also builds the standalone ankhang binary (see cli.NewApp), so the
-// binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
 func init() { kit.Register(Domain{}) }
 
-// Domain is the ankhang driver. It carries no state; the per-run client is
-// built by the factory Register hands kit.
+// Domain is the An Khang Pharmacy kit driver.
 type Domain struct{}
 
-// Info describes the scheme, the hostnames a pasted link is matched against, and
-// the identity reused for the binary's help and version.
 func (Domain) Info() kit.DomainInfo {
 	return kit.DomainInfo{
 		Scheme: "ankhang",
 		Hosts:  []string{Host},
 		Identity: kit.Identity{
 			Binary: "ankhang",
-			Short:  "A command line for ankhang.",
-			Long: `A command line for ankhang.
+			Short:  "A command line for An Khang Pharmacy.",
+			Long: `A command line for An Khang Pharmacy (ankhangpharma.com).
 
-ankhang reads public ankhang data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
-			Site: Host,
+Fetches product details and category listings from one of Vietnam's
+top pharmacy chains.
+No API key required.`,
+			Site: "https://" + Host,
 			Repo: "https://github.com/tamnd/ankhang-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `ankhang page` and
-	// `ant get ankhang://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	kit.Handle(app, kit.OpMeta{Name: "product", Group: "product", Single: true,
+		URIType: "product", Resolver: true, Summary: "Fetch a product by slug or URL",
+		Args: []kit.Arg{{Name: "ref", Help: "product slug (category/name) or URL"}}}, getProduct)
 
-	// List op: members of a page, the home of `ankhang links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// ankhang://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	kit.Handle(app, kit.OpMeta{Name: "products", Group: "product", List: true,
+		URIType: "product", Summary: "List products from a category",
+		Args: []kit.Arg{{Name: "category", Help: "category slug (e.g. thuoc-khong-ke-don)"}}}, listProducts)
 }
 
-// newClient builds the client from the host-resolved config, so a host and the
-// standalone binary pace and identify themselves the same way.
 func newClient(_ context.Context, cfg kit.Config) (any, error) {
-	c := NewClient()
+	c := NewClientWithConfig(DefaultConfig())
 	if cfg.UserAgent != "" {
-		c.UserAgent = cfg.UserAgent
+		c.cfg.UserAgent = cfg.UserAgent
 	}
 	if cfg.Rate > 0 {
-		c.Rate = cfg.Rate
+		c.cfg.Rate = cfg.Rate
 	}
 	if cfg.Retries > 0 {
-		c.Retries = cfg.Retries
+		c.cfg.Retries = cfg.Retries
 	}
 	if cfg.Timeout > 0 {
-		c.HTTP.Timeout = cfg.Timeout
+		c.cfg.Timeout = cfg.Timeout
+		c.http.Timeout = cfg.Timeout
 	}
 	return c, nil
 }
 
 // --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type productRef struct {
+	Ref    string  `kit:"arg" help:"product slug or URL"`
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
-	Client *Client `kit:"inject"`
+type productsIn struct {
+	Category string  `kit:"arg" help:"category slug (e.g. thuoc-khong-ke-don)"`
+	Limit    int     `kit:"flag,inherit" help:"max results"`
+	Client   *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func getProduct(ctx context.Context, in productRef, emit func(*Product) error) error {
+	slug := productSlug(in.Ref)
+	if slug == "" {
+		return errs.Usage("unrecognized An Khang Pharmacy product reference: %q", in.Ref)
+	}
+	p, err := in.Client.GetProduct(ctx, slug)
 	if err != nil {
-		return mapErr(err)
+		return err
 	}
 	return emit(p)
 }
 
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
+func listProducts(ctx context.Context, in productsIn, emit func(*Product) error) error {
+	products, err := in.Client.ListProducts(ctx, in.Category, 1, in.Limit)
 	if err != nil {
-		return mapErr(err)
+		return err
 	}
-	for _, p := range pages {
+	for _, p := range products {
 		if err := emit(p); err != nil {
 			return err
 		}
@@ -128,46 +101,38 @@ func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
 	return nil
 }
 
-// --- Resolver: the URI-native string functions, pure and network-free ---
+// --- Resolver ---
 
-// Classify turns any accepted input — a bare path or a full ankhang.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
 func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
-		return "", "", errs.Usage("unrecognized ankhang reference: %q", input)
+	slug := productSlug(input)
+	if slug != "" {
+		return "product", slug, nil
 	}
-	return "page", id, nil
+	return "", "", errs.Usage("unrecognized An Khang Pharmacy reference: %q", input)
 }
 
-// Locate is the inverse: the live https URL for a (type, id).
 func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
+	switch uriType {
+	case "product":
+		return baseURL + "/" + strings.Trim(id, "/") + ".html", nil
+	default:
 		return "", errs.Usage("ankhang has no resource type %q", uriType)
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
 }
 
-// --- helpers ---
-
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
+// productSlug normalises any user input into a canonical slug (no .html).
+func productSlug(input string) string {
 	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
+	if input == "" {
+		return ""
 	}
-	return strings.Trim(input, "/")
-}
-
-// mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
-func mapErr(err error) error {
-	return err
+	if strings.Contains(input, "ankhangpharma.com") || strings.HasPrefix(input, "http") {
+		return extractSlug(input)
+	}
+	slug := strings.Trim(input, "/")
+	slug = strings.TrimSuffix(slug, ".html")
+	if slug != "" && !strings.Contains(slug, " ") {
+		return slug
+	}
+	return ""
 }
