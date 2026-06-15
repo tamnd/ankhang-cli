@@ -1,0 +1,10 @@
+title       = "ankhang"
+baseURL     = "https://ankhang-cli.tamnd.com/"
+description = "A command line for ankhang."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/ankhang-cli"
